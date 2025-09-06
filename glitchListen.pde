@@ -1,0 +1,755 @@
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Glitch Geometry Listener (XL) — FULLY ANNOTATED TEACHING VERSION
+ * ─────────────────────────────────────────────────────────────────────────────
+ * PURPOSE
+ *   • Listen to a live audio feed (mic/loopback) using Minim.
+ *   • Analyze sound (RMS, FFT bands, spectral centroid, spectral flux, onset).
+ *   • Spawn short-lived, layered “glitch forms” (complex geometries).
+ *   • Post-process the whole frame with: RGB channel split, feedback smear, strobe.
+ *   • Provide OSC in/out for rig control and telemetry.
+ *   • Save/Load presets (JSON) so a “look” can be recalled during a show.
+ *
+ * PEDAGOGY
+ *   • Split into clear sections with careful comments explaining each concept:
+ *     - imports, globals, setup/draw, analysis, effects, spawner, OSC, presets, forms
+ *
+ * CONTROLS (keyboard)
+ *   SPACE  = spawn a form now
+ *   C      = toggle RGB channel split
+ *   F      = toggle feedback pass
+ *   G      = toggle grainy fade floor (the slow black fade)
+ *   B      = toggle beat-linked strobe
+ *   [ / ]  = strobe intensity down/up
+ *   - / =  = feedback amount down/up
+ *   , / .  = feedback rotation down/up
+ *   ; / '  = feedback zoom down/up
+ *   P      = save a preset JSON to data/
+ *   L      = load the most recent preset JSON from data/
+ *   S      = saveFrame("glitch-####.png")
+ *
+ * OSC (defaults): listen on 127.0.0.1:9000, send to 127.0.0.1:9001
+ *   IN:
+ *     /glitch/rgbShift        float 0..1 (0=off, 1=on)
+ *     /glitch/strobe          float 0..1
+ *     /glitch/strobeIntensity float 0..1
+ *     /glitch/feedback        float 0..1
+ *     /glitch/fbAmount        float 0..1
+ *     /glitch/fbRotate        float -1..1  (mapped to small radians)
+ *     /glitch/fbZoom          float 0.9..1.1
+ *     /glitch/spawn           float >0 triggers one spawn
+ *   OUT (each frame):
+ *     /glitch/telemetry rms, flux, centroid, bass, mid, high, forms(int)
+ */
+
+// ── Imports ──────────────────────────────────────────────────────────────────
+// Minim: audio input + FFT
+import ddf.minim.*;
+import ddf.minim.analysis.*;
+
+// OSC: networking for remote control / telemetry
+import oscP5.*;
+import netP5.*;
+
+// ── Audio Analysis Globals ───────────────────────────────────────────────────
+Minim minim;            // audio engine
+AudioInput in;          // mic/line input (mono is fine for analysis)
+FFT fft;                // frequency transform
+BeatDetect beat;        // onset detector (simple beat heuristic)
+
+// Per-frame analysis results (we compute these each draw())
+float rms, peak;            // loudness (root mean square), instantaneous peak
+float spectralCentroid;     // “brightness” of spectrum (Hz-weighted average)
+float spectralFlux;         // how much the spectrum changed since last frame
+float[] lastSpectrum;       // previous FFT bins, used to compute flux
+
+// “Bands” = simple low/mid/high buckets (smoothed for visual stability)
+float smoothedBass = 0;
+float smoothedMid  = 0;
+float smoothedHigh = 0;
+
+// ── Visual / State Globals ───────────────────────────────────────────────────
+ArrayList<GlitchForm> forms = new ArrayList<GlitchForm>(); // active geometry
+int maxForms = 4;                                          // cap the chaos
+
+// Offscreen buffers for effects
+PGraphics fb;          // framebuffer used for feedback smear
+PGraphics frameCopy;   // copy of current frame for RGB channel split
+
+// Effect toggles
+boolean doRGBShift  = true;  // channel-split glitch
+boolean doFeedback  = true;  // smear/zoom/rotate previous frame
+boolean doFadeFloor = true;  // slow fading-to-black background
+
+// Global “camera shake” knob (derived from audio energy)
+float globalShake = 0;
+
+// ── Spawning Control (prevents absurd spawn rates) ───────────────────────────
+int lastSpawnFrame = 0;       // when we spawned last
+int minSpawnGapFrames = 10;   // frames to wait before next allowed spawn
+
+// ── Strobe Effect Params ─────────────────────────────────────────────────────
+boolean strobeOn          = true;  // master on/off
+float   strobeIntensity   = 0.65;  // 0..1 alpha of white flash
+boolean strobeBeatLinked  = true;  // flash on beat?
+int     strobeHoldFrames  = 2;     // flash duration (frames)
+int     strobeCountdown   = 0;     // internal counter for flash
+
+// ── Feedback Effect Params ───────────────────────────────────────────────────
+float fbAmount = 0.82;   // opacity of previous frame (0=none, 1=full)
+float fbRotate = 0.005;  // radians of rotation per frame (tiny)
+float fbZoom   = 1.004;  // >1 = slow zoom-in; <1 = zoom-out
+
+// ── OSC Networking (change ports/addr if needed) ─────────────────────────────
+OscP5 osc;                                         // OSC server (incoming)
+NetAddress oscOut = new NetAddress("127.0.0.1", 9001); // where we send frames
+int oscInPort = 9000;                              // where we listen
+
+// ── Processing setup(): runs once at program start ───────────────────────────
+void settings() {
+  // P2D renderer = fast 2D w/ OpenGL; 1000×1000 canvas as requested
+  size(1000, 1000, P2D);
+  smooth(4); // anti-aliasing
+}
+
+void setup() {
+  surface.setTitle("Glitch Geometry Listener (XL) — Teaching Build");
+  frameRate(60); // steady 60 fps target
+
+  // Initialize Minim + audio input
+  minim = new Minim(this);
+  // getLineIn(mode, bufferSize, sampleRate, bitDepth)
+  // MONO is fine for analysis; buffer 1024 balances latency/resolution
+  in    = minim.getLineIn(Minim.MONO, 1024, 44100.0f, 16);
+
+  // FFT configured to match buffer + sample rate
+  fft   = new FFT(in.bufferSize(), in.sampleRate());
+  // Create a set of logarithmically spaced averages (more detail in lows)
+  fft.logAverages(22, 3);
+
+  // Simple onset detector; sensitivity “locks out” new beats for N ms
+  beat  = new BeatDetect(in.bufferSize(), (int)in.sampleRate());
+  beat.setSensitivity(80); // try 50–120ms depending on your material
+
+  // Store last frame’s spectrum to compute flux
+  lastSpectrum = new float[fft.specSize()];
+
+  // Offscreen buffers
+  fb        = createGraphics(width, height, P2D);
+  frameCopy = createGraphics(width, height, P2D);
+
+  // Start OSC server
+  osc = new OscP5(this, oscInPort);
+
+  // Initial clear
+  background(0);
+  fb.beginDraw(); fb.background(0); fb.endDraw();
+}
+
+// ── Processing draw(): runs every frame ───────────────────────────────────────
+void draw() {
+  // 1) Audio analysis first: updates rms, bands, centroid, flux, beat state
+  analyzeAudio();
+
+  // 2) Spawning logic (may create a new geometry form on bursts)
+  maybeSpawn();
+
+  // 3) Optional global fade (slowly cover frame with translucent black)
+  if (doFadeFloor) {
+    noStroke();
+    fill(0, 28);     // low alpha to keep trails
+    rect(0, 0, width, height);
+  }
+
+  // 4) “Camera shake” for energy — subtle random motion based on analysis
+  float energy = constrain(rms * 5 + smoothedHigh * 0.7 + (beat.isOnset() ? 0.4 : 0), 0, 2);
+  globalShake  = lerp(globalShake, energy * 12, 0.1);
+
+  // Apply camera shake & tiny rotation to the whole scene while drawing forms
+  pushMatrix();
+  translate(width/2f, height/2f); // draw forms around center
+  translate(random(-globalShake, globalShake), random(-globalShake, globalShake));
+  rotate(radians(random(-0.2, 0.2)));
+
+  // 5) Draw/update forms; remove dead ones (short lifespans → restless look)
+  for (int i = forms.size()-1; i >= 0; i--) {
+    GlitchForm f = forms.get(i);
+    f.update(rms, smoothedBass, smoothedMid, smoothedHigh, spectralCentroid, beat.isOnset());
+    f.draw();    // each form has its own geometry logic
+    if (f.dead()) forms.remove(i);
+  }
+  popMatrix();
+
+  // 6) Post passes: RGB split (channel offsets), then Feedback smear, then Strobe
+  if (doRGBShift) rgbSplitComposite();
+  if (doFeedback) applyFeedback();
+  if (strobeOn)   strobePass();
+
+  // 7) Send telemetry each frame for your rig / recording
+  sendTelemetry();
+}
+
+// ── Cleanup (called by Processing on stop) ───────────────────────────────────
+void stop() {
+  in.close();
+  minim.stop();
+  super.stop();
+}
+
+// ── AUDIO ANALYSIS: compute RMS, bands, centroid, flux, and detect onsets ───
+void analyzeAudio() {
+  // Compute RMS (root mean square) and peak for this audio buffer.
+  // Concept: RMS ~ perceived loudness. Peak ~ instantaneous max.
+  float sumSq = 0;
+  peak = 0;
+  for (int i = 0; i < in.bufferSize(); i++) {
+    float v = in.mix.get(i);
+    sumSq += v * v;
+    peak = max(peak, abs(v));
+  }
+  rms = sqrt(sumSq / in.bufferSize());
+
+  // FFT: from time domain (samples) → frequency domain (bins).
+  // We use a window function to reduce spectral leakage.
+  fft.window(FFT.HAMMING);
+  fft.forward(in.mix);
+
+  // Simple band aggregation:
+  // low  ( < 200Hz ) for bass/rumble
+  // mid  (200–2000Hz) for body/snarls
+  // high ( > 2kHz )  for hiss/brightness
+  float bass = 0, mid = 0, high = 0;
+  int n = fft.specSize();
+  for (int i = 0; i < n; i++) {
+    float freq = i * (in.sampleRate()/2.0) / n;   // map bin index → Hz
+    float mag  = fft.getBand(i);
+    if (freq < 200)         bass += mag;
+    else if (freq < 2000)   mid  += mag;
+    else                    high += mag;
+  }
+  // Normalize roughly by bin count to keep values in a friendly range
+  float norm = 1.0 / max(1, n);
+  bass *= norm; mid *= norm; high *= norm;
+
+  // Smooth the bands so visuals don’t jitter frame-to-frame
+  smoothedBass = lerp(smoothedBass, bass, 0.15);
+  smoothedMid  = lerp(smoothedMid,  mid,  0.15);
+  smoothedHigh = lerp(smoothedHigh, high, 0.15);
+
+  // Spectral Centroid: weighted average of frequency by magnitude.
+  // Intuition: if energy shifts to higher frequencies, centroid rises.
+  float num = 0, den = 0;
+  for (int i = 0; i < n; i++) {
+    float freq = i * (in.sampleRate()/2.0) / n;
+    float mag  = fft.getBand(i) + 1e-9; // avoid divide-by-zero
+    num += freq * mag;
+    den += mag;
+  }
+  spectralCentroid = (den > 0) ? num / den : 0;
+
+  // Spectral Flux: “how much did the spectrum change since last frame?”
+  // Only positive changes contribute (common definition).
+  float flux = 0;
+  for (int i = 0; i < n; i++) {
+    float cur  = fft.getBand(i);
+    float diff = cur - lastSpectrum[i];
+    if (diff > 0) flux += diff;
+    lastSpectrum[i] = cur; // keep for next frame
+  }
+  spectralFlux = flux * norm;
+
+  // Onset detection (beat-ish)
+  beat.detect(in.mix);
+}
+
+// ── SPAWNING: create new geometry instances when the sound “bursts” ─────────
+void maybeSpawn() {
+  // Burst condition: a detected onset OR big spectral change OR high RMS
+  boolean burst = beat.isOnset() || spectralFlux > 0.45 || rms > 0.18;
+
+  // Rate-limit spawns so we don’t overwhelm the frame every single tick.
+  if (burst && frameCount - lastSpawnFrame > minSpawnGapFrames) {
+    spawnForm();
+    lastSpawnFrame = frameCount;
+  }
+
+  // Enforce the active-form limit (remove oldest if over cap)
+  while (forms.size() > maxForms) forms.remove(0);
+}
+
+// Create a randomly chosen form type and add it to the list.
+void spawnForm() {
+  int choice = (int)random(5); // 5 types below
+  GlitchForm f;
+  switch (choice) {
+    case 0: f = new PolygonBurst();  break;
+    case 1: f = new WireLissajous(); break;
+    case 2: f = new NoisyDonut();    break;
+    case 3: f = new TriStripWeave(); break;
+    default:f = new SpiroSpline();   break;
+  }
+  forms.add(f);
+}
+
+// ── EFFECT PASS: RGB channel split (chromatic aberration / glitch) ──────────
+void rgbSplitComposite() {
+  // 1) Copy the on-screen frame to an offscreen buffer (frameCopy)
+  frameCopy.beginDraw();
+  frameCopy.image(get(), 0, 0); // get() grabs the current display window
+  frameCopy.endDraw();
+
+  // 2) Compute how far to split channels. More highs + onsets → larger split
+  float amt = map(smoothedHigh, 0, 0.6, 0, 12) + (beat.isOnset() ? 8 : 0);
+  amt = constrain(amt, 0, 24);
+
+  // 3) Clear the screen to black (prevents edge smears)
+  blendMode(BLEND);
+  noTint();
+  fill(0); noStroke(); rect(0, 0, width, height);
+
+  // 4) Draw each color channel with a different offset
+  tint(255, 0, 0); image(frameCopy,  amt,    0);      // red shifted right
+  tint(0, 255, 0); image(frameCopy, -amt/2,  amt/3);  // green shifted diag
+  tint(0, 0, 255); image(frameCopy, -amt,   -amt/4);  // blue shifted left/up
+  noTint();
+}
+
+// ── EFFECT PASS: Framebuffer feedback (smear/zoom/rotate previous frame) ────
+void applyFeedback() {
+  // Idea: re-draw a transformed version of the last frame on top of this one,
+  // with some transparency. Over time, this creates a greasy echo of motion.
+  fb.beginDraw();
+  fb.blendMode(BLEND);
+  fb.noStroke();
+
+  // Transform around center so rotation/zoom feel “camera-like”
+  fb.pushMatrix();
+  fb.translate(fb.width/2f, fb.height/2f);
+  fb.scale(fbZoom);     // slow zoom in/out
+  fb.rotate(fbRotate);  // slight rotation each frame
+  fb.translate(-fb.width/2f, -fb.height/2f);
+
+  // Draw the *current* visible frame into fb with some alpha (fbAmount)
+  fb.tint(255, 255 * fbAmount);
+  fb.image(get(), 0, 0);
+  fb.noTint();
+
+  fb.popMatrix();
+  fb.endDraw();
+
+  // Now blend the updated fb back onto the window (ADD brightens trails)
+  blendMode(ADD);
+  image(fb, 0, 0);
+  blendMode(BLEND);
+}
+
+// ── EFFECT PASS: Strobe (full-frame white flash) ─────────────────────────────
+void strobePass() {
+  // Two ways to “fire” a flash:
+  //  1) beat-linked (whenever beat.isOnset() is true)
+  //  2) timed hold via strobeCountdown (for short flickers)
+  boolean fire = false;
+  if (strobeBeatLinked && beat.isOnset()) fire = true;
+  if (strobeCountdown > 0) { fire = true; strobeCountdown--; }
+
+  if (fire) {
+    noStroke();
+    float a = 255 * constrain(strobeIntensity, 0, 1);
+    fill(255, a);
+    rect(0, 0, width, height);
+  }
+}
+
+// ── OSC: receive control messages from other apps/devices ───────────────────
+void oscEvent(OscMessage m) {
+  String addr = m.addrPattern();
+
+  if      (addr.equals("/glitch/rgbShift"))        doRGBShift = m.get(0).floatValue() > 0.5;
+  else if (addr.equals("/glitch/strobe"))          strobeOn   = m.get(0).floatValue() > 0.5;
+  else if (addr.equals("/glitch/strobeIntensity")) strobeIntensity = constrain(m.get(0).floatValue(), 0, 1);
+  else if (addr.equals("/glitch/feedback"))        doFeedback = m.get(0).floatValue() > 0.5;
+  else if (addr.equals("/glitch/fbAmount"))        fbAmount   = constrain(m.get(0).floatValue(), 0, 1);
+  else if (addr.equals("/glitch/fbRotate"))        fbRotate   = m.get(0).floatValue() * 0.05; // scale small
+  else if (addr.equals("/glitch/fbZoom"))          fbZoom     = constrain(m.get(0).floatValue(), 0.9, 1.1);
+  else if (addr.equals("/glitch/spawn")) {
+    if (m.get(0).floatValue() > 0) spawnForm();
+  }
+}
+
+// Send one OSC packet per frame with analysis values (for metering/recording)
+void sendTelemetry() {
+  OscMessage out = new OscMessage("/glitch/telemetry");
+  out.add(rms);
+  out.add(spectralFlux);
+  out.add(spectralCentroid);
+  out.add(smoothedBass);
+  out.add(smoothedMid);
+  out.add(smoothedHigh);
+  out.add(forms.size());
+  osc.send(out, oscOut);
+}
+
+// ── PRESETS: Save current settings to JSON, load the most recent one ────────
+void savePreset() {
+  JSONObject j = new JSONObject();
+  j.setBoolean("doRGBShift", doRGBShift);
+  j.setBoolean("doFeedback", doFeedback);
+  j.setBoolean("doFadeFloor", doFadeFloor);
+  j.setBoolean("strobeOn", strobeOn);
+  j.setBoolean("strobeBeatLinked", strobeBeatLinked);
+  j.setFloat("strobeIntensity", strobeIntensity);
+  j.setFloat("fbAmount", fbAmount);
+  j.setFloat("fbRotate", fbRotate);
+  j.setFloat("fbZoom", fbZoom);
+  j.setInt("minSpawnGapFrames", minSpawnGapFrames);
+  j.setInt("maxForms", maxForms);
+
+  String fname = "preset_" + year()
+               + nf(month(),2) + nf(day(),2) + "_"
+               + nf(hour(),2) + nf(minute(),2) + nf(second(),2)
+               + ".json";
+  saveJSONObject(j, "data/" + fname);
+  println("Saved preset: data/" + fname);
+}
+
+void loadMostRecentPreset() {
+  java.io.File dataDir = new java.io.File(dataPath(""));
+  if (!dataDir.exists()) { println("No data/ directory yet."); return; }
+  java.io.File[] files = dataDir.listFiles();
+  String best = null;
+  for (java.io.File f : files) {
+    if (f.getName().toLowerCase().endsWith(".json")) {
+      if (best == null || f.getName().compareTo(best) > 0) best = f.getName();
+    }
+  }
+  if (best == null) { println("No preset JSON found in data/."); return; }
+  JSONObject j = loadJSONObject("data/" + best);
+
+  doRGBShift        = j.getBoolean("doRGBShift", doRGBShift);
+  doFeedback        = j.getBoolean("doFeedback", doFeedback);
+  doFadeFloor       = j.getBoolean("doFadeFloor", doFadeFloor);
+  strobeOn          = j.getBoolean("strobeOn", strobeOn);
+  strobeBeatLinked  = j.getBoolean("strobeBeatLinked", strobeBeatLinked);
+  strobeIntensity   = j.getFloat("strobeIntensity", strobeIntensity);
+  fbAmount          = j.getFloat("fbAmount", fbAmount);
+  fbRotate          = j.getFloat("fbRotate", fbRotate);
+  fbZoom            = j.getFloat("fbZoom", fbZoom);
+  minSpawnGapFrames = j.getInt("minSpawnGapFrames", minSpawnGapFrames);
+  maxForms          = j.getInt("maxForms", maxForms);
+
+  println("Loaded preset: data/" + best);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GEOMETRY SYSTEM: “GlitchForm” base class and five concrete forms
+//   • Short-lived, jittery. Update with audio features, then draw.
+//   • Each form chooses parameters at birth (seed/sides/etc.) to stay diverse.
+// ─────────────────────────────────────────────────────────────────────────────
+
+abstract class GlitchForm {
+  // Birth timing + randomized life span for instability
+  float born   = millis();
+  float lifeMs = random(400, 1700);
+
+  // Start near center with small offsets; each frame they jitter/react
+  float x = random(-200, 200);
+  float y = random(-200, 200);
+
+  // Rotation & spin
+  float rot    = random(TWO_PI);
+  float rotVel = random(-0.02, 0.02);
+
+  // Random base scale (can be used by subclasses if desired)
+  float scale0 = random(0.6, 1.4);
+
+  // Random seed for per-instance coherency (noise/random patterns)
+  int seed = (int)random(1<<24);
+
+  // Visual styling
+  int strokeCol = color(255);
+  int fillCol   = color(255, 20);
+  boolean additive = random(1) < 0.6; // choose ADD vs SCREEN blending
+
+  // Called each frame with fresh audio features
+  void update(float rms, float bass, float mid, float high, float centroid, boolean onset) {
+    // Spin a little, snap more on onsets
+    rot += rotVel + (onset ? random(-0.1, 0.1) : 0);
+
+    // Wander with bias from mid/high bands (feels “nervous” on harsh material)
+    x += random(-3, 3) * (0.5 + high);
+    y += random(-3, 3) * (0.5 + mid);
+
+    // Color mapping: crude but effective band→RGB mapping
+    int r = (int)map(high, 0, 0.8, 50, 255);  // highs push red (harshness)
+    int g = (int)map(mid,  0, 0.8, 30, 200);  // mids push green
+    int b = (int)map(bass, 0, 0.8, 20, 150);  // bass pushes blue
+    strokeCol = color(r, g, b);
+    // Fill alpha responds to loudness
+    fillCol   = color(r, g, b, (int)map(rms, 0, 0.6, 18, 80));
+  }
+
+  // Life helpers
+  float   life()     { return millis() - born; }
+  float   normLife() { return constrain(life() / lifeMs, 0, 1); }
+  boolean dead()     { return life() > lifeMs; }
+
+  // Subclasses must implement their own draw()
+  abstract void draw();
+}
+
+// ── Form 1: PolygonBurst ─────────────────────────────────────────────────────
+// A many-sided polygon whose vertices jitter via noise + alternating offsets.
+// Interior “wiring” lines add complexity.
+class PolygonBurst extends GlitchForm {
+  int   sides  = (int)random(7, 23);
+  float radius = random(80, 260);
+
+  void draw() {
+    pushMatrix(); pushStyle();
+    translate(width/2f + x, height/2f + y);
+    rotate(rot);
+
+    float t    = normLife(); // 0 → 1 across lifespan
+    float rNow = radius * (1.0 + 0.6 * sin(TWO_PI * (t + random(0.01))));
+
+    // Choose a bright blend mode for glow
+    if (additive) blendMode(ADD); else blendMode(SCREEN);
+
+    // Outline polygon with jitter
+    noFill();
+    stroke(strokeCol);
+    strokeWeight(map(t, 0, 1, 3, 0.6)); // thin out as it dies
+
+    beginShape();
+    randomSeed(seed); // stable per-instance wobble
+    for (int i = 0; i < sides; i++) {
+      float a      = TWO_PI * i / sides;
+      float jitter = noise(i*0.2, frameCount*0.03) * 35 * (1.8 - t); // fade jitter over life
+      float rr     = rNow + jitter + (i % 2 == 0 ? 18 : -18);        // alternating spikes
+      vertex(rr * cos(a), rr * sin(a));
+    }
+    endShape(CLOSE);
+
+    // Interior cross-lines for extra structure (light, semi-random)
+    stroke(255, 30);
+    for (int k = 0; k < sides/3; k++) {
+      int i1 = (int)random(sides), i2 = (int)random(sides);
+      float a1 = TWO_PI * i1 / sides;
+      float a2 = TWO_PI * i2 / sides;
+      line(rNow*cos(a1), rNow*sin(a1), rNow*cos(a2), rNow*sin(a2));
+    }
+
+    popStyle(); popMatrix();
+  }
+}
+
+// ── Form 2: WireLissajous ────────────────────────────────────────────────────
+// A dense wireframe Lissajous curve (ax, ay frequencies). It morphs over time,
+// jitters slightly, and adds cross-threads for lattice complexity.
+class WireLissajous extends GlitchForm {
+  float ax = random(2, 9), ay = random(2, 9); // curve frequencies
+  float phase = random(TWO_PI);
+  int   pts   = 500;
+
+  void draw() {
+    pushMatrix(); pushStyle();
+    translate(width/2f + x, height/2f + y);
+    rotate(rot);
+
+    blendMode(ADD);
+    noFill();
+    stroke(strokeCol);
+    strokeWeight(1.5);
+
+    float t = normLife();
+    float s = 120 + 220 * (1.0 - t); // shrink over life
+
+    // Main path
+    beginShape();
+    for (int i = 0; i < pts; i++) {
+      float u  = map(i, 0, pts-1, 0, TWO_PI);
+      float px = s * sin(ax * u + phase + t*8) + random(-2, 2) * (1.5 - t);
+      float py = s * sin(ay * u + t*6)         + random(-2, 2) * (1.5 - t);
+      vertex(px, py);
+    }
+    endShape();
+
+    // Cross threads (faint)
+    stroke(255, 40);
+    for (int k = 0; k < 20; k++) {
+      float u1 = random(TWO_PI), u2 = random(TWO_PI);
+      float px1 = s * sin(ax*u1 + phase), py1 = s * sin(ay*u1);
+      float px2 = s * sin(ax*u2 + phase), py2 = s * sin(ay*u2);
+      line(px1, py1, px2, py2);
+    }
+
+    popStyle(); popMatrix();
+  }
+}
+
+// ── Form 3: NoisyDonut ───────────────────────────────────────────────────────
+// A torus-like “donut” constructed from triangle strips. The outer radius
+// wiggles per segment; the inner “tube” oscillates → complex woven look.
+class NoisyDonut extends GlitchForm {
+  int   ribs = (int)random(20, 48); // how many donut slices
+  float r1   = random(80, 160);     // base outer radius
+  float r2   = random(26, 60);      // tube radius
+
+  void draw() {
+    pushMatrix(); pushStyle();
+    translate(width/2f + x, height/2f + y);
+    rotate(rot);
+
+    blendMode(SCREEN);
+    noStroke();
+
+    float t   = normLife();
+    float rr1 = r1 * (1.0 + 0.25 * sin(frameCount*0.07));
+    float rr2 = r2 * (1.0 + 0.4  * sin(frameCount*0.11 + seed));
+
+    for (int i = 0; i < ribs; i++) {
+      float a   = TWO_PI * i / ribs;
+      float a2  = TWO_PI * (i+1) / ribs;
+
+      // Per-slice noise to deform outer radius
+      float n1  = noise(i*0.09,     frameCount*0.02) * 40 * (1.4 - t);
+      float n2  = noise((i+1)*0.09, frameCount*0.02) * 40 * (1.4 - t);
+
+      float R1 = rr1 + n1, R2 = rr1 + n2;
+
+      // Color gradient around the ring (lerp to a highlight)
+      int c = lerpColor(fillCol, color(255, 80), (float)i / ribs);
+      fill(c);
+
+      // Build one “rib” as a small triangle strip along the tube angle
+      beginShape(TRIANGLE_STRIP);
+      for (int k = 0; k <= 6; k++) {
+        float phi = map(k, 0, 6, 0, TWO_PI); // sweep around tube
+        float ar  = map(k, 0, 6, a, a2);     // move along ring segment
+        float x1 = (R1 + rr2*cos(phi)) * cos(ar);
+        float y1 = (R1 + rr2*cos(phi)) * sin(ar);
+        float x2 = (R2 + rr2*cos(phi)) * cos(a2);
+        float y2 = (R2 + rr2*cos(phi)) * sin(a2);
+        vertex(x1, y1);
+        vertex(x2, y2);
+      }
+      endShape();
+    }
+
+    popStyle(); popMatrix();
+  }
+}
+
+// ── Form 4: TriStripWeave ────────────────────────────────────────────────────
+// Concentric triangle strips whose radii wobble with different harmonics,
+// forming a vibrating woven disk.
+class TriStripWeave extends GlitchForm {
+  int strips = (int)random(8, 16);
+  int segs   = 120;
+
+  void draw() {
+    pushMatrix(); pushStyle();
+    translate(width/2f + x, height/2f + y);
+    rotate(rot);
+
+    blendMode(ADD);
+    stroke(strokeCol);
+    noFill();
+
+    float t = normLife();
+
+    for (int s = 0; s < strips; s++) {
+      float rad = 60 + s*16 + 20 * sin((frameCount + s*9) * 0.06);
+      float wob = 12 + 30 * noise(s*0.2, frameCount*0.03);
+
+      beginShape(TRIANGLE_STRIP);
+      for (int i = 0; i <= segs; i++) {
+        float u  = map(i, 0, segs, 0, TWO_PI);
+        float r1 = rad + wob * sin(u * (3 + s%5) + t*10);
+        float r2 = rad + wob * cos(u * (2 + s%7) - t*9);
+        vertex(r1 * cos(u),          r1 * sin(u));
+        vertex(r2 * cos(u + 0.02f),  r2 * sin(u + 0.02f));
+      }
+      endShape();
+    }
+
+    popStyle(); popMatrix();
+  }
+}
+
+// ── Form 5: SpiroSpline ──────────────────────────────────────────────────────
+// Hypotrochoid-like spirograph curve with occasional “tears” (pen-up breaks).
+class SpiroSpline extends GlitchForm {
+  int   pts = 900;
+  float R = random(120, 220), r = random(12, 60), p = random(10, 80);
+
+  void draw() {
+    pushMatrix(); pushStyle();
+    translate(width/2f + x, height/2f + y);
+    rotate(rot);
+
+    blendMode(ADD);
+    noFill();
+    stroke(strokeCol);
+    strokeWeight(1.3);
+
+    float t = normLife();
+
+    beginShape();
+    for (int i = 0; i < pts; i++) {
+      float u  = i * 0.04f;
+      float a  = u + t * 14; // time drift to keep it evolving
+      float px = (R - r) * cos(a) + p * cos(((R - r) / r) * a);
+      float py = (R - r) * sin(a) - p * sin(((R - r) / r) * a);
+
+      // “Tearing” jitter declines over life
+      px += random(-3, 3) * (1.8 - t);
+      py += random(-3, 3) * (1.8 - t);
+
+      // Occasionally break the path (like a skipping pen)
+      if (random(1) < 0.01) { endShape(); beginShape(); }
+
+      vertex(px, py);
+    }
+    endShape();
+
+    popStyle(); popMatrix();
+  }
+}
+
+// ── KEYBOARD CONTROLS (simple show-time interface) ───────────────────────────
+void keyPressed() {
+  if (key == ' ') {                     // force a form spawn
+    spawnForm();
+  }
+  if (key == 's' || key == 'S') {       // save a still frame
+    saveFrame("glitch-####.png");
+  }
+  if (key == 'c' || key == 'C') {       // toggle RGB split
+    doRGBShift = !doRGBShift;
+  }
+  if (key == 'f' || key == 'F') {       // toggle feedback
+    doFeedback = !doFeedback;
+  }
+  if (key == 'g' || key == 'G') {       // toggle fade floor
+    doFadeFloor = !doFadeFloor;
+  }
+  if (key == 'b' || key == 'B') {       // toggle beat-linked strobe
+    strobeBeatLinked = !strobeBeatLinked;
+    if (strobeBeatLinked) strobeCountdown = strobeHoldFrames;
+  }
+  if (key == '[')  strobeIntensity = max(0,   strobeIntensity - 0.05);
+  if (key == ']')  strobeIntensity = min(1,   strobeIntensity + 0.05);
+  if (key == '-')  fbAmount        = max(0,   fbAmount - 0.04);
+  if (key == '=')  fbAmount        = min(1,   fbAmount + 0.04);
+  if (key == ',')  fbRotate       -= 0.002;
+  if (key == '.')  fbRotate       += 0.002;
+  if (key == ';')  fbZoom          = max(0.95, fbZoom - 0.002);
+  if (key == '\'') fbZoom          = min(1.05, fbZoom + 0.002);
+  if (key == 'p' || key == 'P') {       // save preset
+    savePreset();
+  }
+  if (key == 'l' || key == 'L') {       // load latest preset
+    loadMostRecentPreset();
+  }
+}
