@@ -546,7 +546,7 @@ abstract class GlitchForm {
   float born   = millis();
   float lifeMs = random(400, 1700);
 
-  // Start dead-center; jitter will sling them around after birth
+  // Start somewhere around the screen with a bit of initial drift
   float x = 0;
   float y = 0;
   float vx = 0;
@@ -567,6 +567,16 @@ abstract class GlitchForm {
   int strokeCol = color(255);
   int fillCol   = color(255, 20);
   boolean additive = random(1) < 0.6; // choose ADD vs SCREEN blending
+
+  GlitchForm() {
+    // Randomize spawn away from corners so we don't cluster bottom-right again
+    float rx = width * 0.4f;
+    float ry = height * 0.4f;
+    x = random(-rx, rx);
+    y = random(-ry, ry);
+    vx = random(-2, 2);
+    vy = random(-2, 2);
+  }
 
   // Called each frame with fresh audio features
   void update(float rms, float bass, float mid, float high, float centroid, boolean onset) {
