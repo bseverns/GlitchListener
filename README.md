@@ -45,6 +45,10 @@ Here's your live rig cheat sheet—no mysteries, just hot keys:
 
 Shapes now pop in from jittery starting points all over the field—never jailed in one corner—before wandering off like caffeinated fireflies.
 
+### How the chaos triggers
+
+An FFT chews up the incoming sound and watches the bass, mids, and highs. When any band spikes hard enough, a form tied to that part of the spectrum barges in. Bass hits birth chunky polygons, mids swirl donuts or splines, and highs scribble wiry Lissajous loops. The stage now allows up to **16** forms at once so no riff gets left behind.
+
 As each form ages it feels the tug of an invisible galactic drain.  The closer it gets to dying, the harder it's yanked toward the nearest edge.  Smack into the boundary and it goes supernova, spraying a cloud of tiny motes whose count nods to the form's own vertex guts.  Those motes chill out over time, drifting into a hazy floor that hangs behind the action so the whole mess has a ghostly ground to stomp on.
 
 ## Closing time
