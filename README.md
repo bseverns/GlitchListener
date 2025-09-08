@@ -43,7 +43,7 @@ Here's your live rig cheat sheet—no mysteries, just hot keys:
 * `S` – grab a `saveFrame()` screenshot.
 * `I` – hide or show the on-screen help box squatting in the lower-right 250×250 patch.
 
-Shapes now burst into existence dead-center before wandering off like caffeinated fireflies.
+Shapes now pop in from jittery starting points all over the field—never jailed in one corner—before wandering off like caffeinated fireflies.
 
 As each form ages it feels the tug of an invisible galactic drain.  The closer it gets to dying, the harder it's yanked toward the nearest edge.  Smack into the boundary and it goes supernova, spraying a cloud of tiny motes whose count nods to the form's own vertex guts.  Those motes chill out over time, drifting into a hazy floor that hangs behind the action so the whole mess has a ghostly ground to stomp on.
 
