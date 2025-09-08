@@ -27,6 +27,7 @@
  *   P      = save a preset JSON to data/
  *   L      = load the most recent preset JSON from data/
  *   S      = saveFrame("glitch-####.png")
+ *   I      = show/hide on-screen help box
  *
  * OSC (defaults): listen on 127.0.0.1:9000, send to 127.0.0.1:9001
  *   IN:
@@ -80,6 +81,7 @@ PGraphics frameCopy;   // copy of current frame for RGB channel split
 boolean doRGBShift  = true;  // channel-split glitch
 boolean doFeedback  = true;  // smear/zoom/rotate previous frame
 boolean doFadeFloor = true;  // slow fading-to-black background
+boolean showHelp    = true;  // on-screen command cheat sheet
 
 // Global “camera shake” knob (derived from audio energy)
 float globalShake = 0;
@@ -185,7 +187,10 @@ void draw() {
   if (doFeedback) applyFeedback();
   if (strobeOn)   strobePass();
 
-  // 7) Send telemetry each frame for your rig / recording
+  // 7) Optional on-screen command crib sheet
+  if (showHelp) drawHelp();
+
+  // 8) Send telemetry each frame for your rig / recording
   sendTelemetry();
 }
 
@@ -360,6 +365,41 @@ void strobePass() {
   }
 }
 
+// ── On-screen instructions ───────────────────────────────────────────────────
+void drawHelp() {
+  int w = 250, h = 250;
+  int x = width - w;
+  int y = height - h;
+  pushStyle();
+  fill(0, 180);
+  noStroke();
+  rect(x, y, w, h);
+  fill(255);
+  textAlign(LEFT, TOP);
+  textSize(12);
+  String[] lines = {
+    "SPACE: spawn",
+    "C: RGB split",
+    "F: feedback",
+    "G: fade floor",
+    "B: strobe",
+    "[ / ]: strobe lvl",
+    "- / =: fb amount",
+    ", / .: fb rotate",
+    "; / ': fb zoom",
+    "P: save preset",
+    "L: load preset",
+    "S: save frame",
+    "I: hide help"
+  };
+  float ty = y + 10;
+  for (String s : lines) {
+    text(s, x + 10, ty);
+    ty += 14;
+  }
+  popStyle();
+}
+
 // ── OSC: receive control messages from other apps/devices ───────────────────
 void oscEvent(OscMessage m) {
   String addr = m.addrPattern();
@@ -451,9 +491,9 @@ abstract class GlitchForm {
   float born   = millis();
   float lifeMs = random(400, 1700);
 
-  // Start near center with small offsets; each frame they jitter/react
-  float x = random(-200, 200);
-  float y = random(-200, 200);
+  // Start dead-center; jitter will sling them around after birth
+  float x = 0;
+  float y = 0;
 
   // Rotation & spin
   float rot    = random(TWO_PI);
@@ -506,7 +546,7 @@ class PolygonBurst extends GlitchForm {
 
   void draw() {
     pushMatrix(); pushStyle();
-    translate(width/2f + x, height/2f + y);
+    translate(x, y);
     rotate(rot);
 
     float t    = normLife(); // 0 → 1 across lifespan
@@ -553,7 +593,7 @@ class WireLissajous extends GlitchForm {
 
   void draw() {
     pushMatrix(); pushStyle();
-    translate(width/2f + x, height/2f + y);
+    translate(x, y);
     rotate(rot);
 
     blendMode(ADD);
@@ -597,7 +637,7 @@ class NoisyDonut extends GlitchForm {
 
   void draw() {
     pushMatrix(); pushStyle();
-    translate(width/2f + x, height/2f + y);
+    translate(x, y);
     rotate(rot);
 
     blendMode(SCREEN);
@@ -649,7 +689,7 @@ class TriStripWeave extends GlitchForm {
 
   void draw() {
     pushMatrix(); pushStyle();
-    translate(width/2f + x, height/2f + y);
+    translate(x, y);
     rotate(rot);
 
     blendMode(ADD);
@@ -685,7 +725,7 @@ class SpiroSpline extends GlitchForm {
 
   void draw() {
     pushMatrix(); pushStyle();
-    translate(width/2f + x, height/2f + y);
+    translate(x, y);
     rotate(rot);
 
     blendMode(ADD);
@@ -751,5 +791,8 @@ void keyPressed() {
   }
   if (key == 'l' || key == 'L') {       // load latest preset
     loadMostRecentPreset();
+  }
+  if (key == 'i' || key == 'I') {       // show/hide instructions
+    showHelp = !showHelp;
   }
 }
