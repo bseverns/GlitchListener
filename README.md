@@ -27,7 +27,23 @@ You're hitting a JOGL windowing deadlock.  It often shows up on macOS when OpenG
 
 ## Controls
 
-The sketch comes with a key-mashing interface: spawn shapes, crank the feedback, toggle strobe madness.  Dive into `glitchListen.pde` for the full rundown and tweak what screams at you.
+Here's your live rig cheat sheet—no mysteries, just hot keys:
+
+* `SPACE` – spawn a form on demand.
+* `C` – toggle RGB split glitching.
+* `F` – switch the feedback smear.
+* `G` – fade the floor to black.
+* `B` – beat-driven strobe.
+* `[ / ]` – strobe intensity down/up.
+* `- / =` – feedback amount down/up.
+* `, / .` – feedback rotation.
+* `; / '` – feedback zoom.
+* `P` – save a preset JSON to `data/`.
+* `L` – load the freshest preset.
+* `S` – grab a `saveFrame()` screenshot.
+* `I` – hide or show the on-screen help box squatting in the lower-right 250×250 patch.
+
+Shapes now burst into existence dead-center before wandering off like caffeinated fireflies.
 
 ## Closing time
 
