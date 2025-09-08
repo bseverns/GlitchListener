@@ -45,6 +45,8 @@ Here's your live rig cheat sheet—no mysteries, just hot keys:
 
 Shapes now burst into existence dead-center before wandering off like caffeinated fireflies.
 
+As each form ages it feels the tug of an invisible galactic drain.  The closer it gets to dying, the harder it's yanked toward the nearest edge.  Smack into the boundary and it goes supernova, spraying a cloud of tiny motes whose count nods to the form's own vertex guts.  Those motes chill out over time, drifting into a hazy floor that hangs behind the action so the whole mess has a ghostly ground to stomp on.
+
 ## Closing time
 
 The sketch ships with a `stop()` that cleans up Minim so the audio driver doesn’t get wedged.  If you’re hacking on this and things hang on exit, double-check that you’re calling `super.stop()` after your own cleanup.
