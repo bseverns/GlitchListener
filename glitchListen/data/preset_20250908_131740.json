@@ -5,7 +5,7 @@
   "strobeIntensity": 0.6499999761581421,
   "doRGBShift": true,
   "doFadeFloor": true,
-  "maxForms": 4,
+  "maxForms": 16,
   "doFeedback": true,
   "strobeOn": true,
   "fbAmount": 1,

@@ -72,7 +72,7 @@ float smoothedHigh = 0;
 // ── Visual / State Globals ───────────────────────────────────────────────────
 ArrayList<GlitchForm> forms = new ArrayList<GlitchForm>(); // active geometry
 ArrayList<CloudParticle> clouds = new ArrayList<CloudParticle>(); // lingering dust
-int maxForms = 4;                                          // cap the chaos
+int maxForms = 16;                                         // cap the chaos (overkill but keeps every beat)
 
 // Offscreen buffers for effects
 PGraphics fb;          // framebuffer used for feedback smear
@@ -278,12 +278,19 @@ void analyzeAudio() {
 
 // ── SPAWNING: create new geometry instances when the sound “bursts” ─────────
 void maybeSpawn() {
-  // Burst condition: a detected onset OR big spectral change OR high RMS
-  boolean burst = beat.isOnset() || spectralFlux > 0.45 || rms > 0.18;
+  // Use FFT band energy: if any bucket punches hard, pop a form.
+  boolean bassHit = smoothedBass > 0.3;
+  boolean midHit  = smoothedMid  > 0.25;
+  boolean highHit = smoothedHigh > 0.2;
+
+  int band = -1; // 0=bass,1=mid,2=high
+  if (bassHit && smoothedBass >= max(smoothedMid, smoothedHigh)) band = 0;
+  else if (midHit && smoothedMid >= smoothedHigh)               band = 1;
+  else if (highHit)                                             band = 2;
 
   // Rate-limit spawns so we don’t overwhelm the frame every single tick.
-  if (burst && frameCount - lastSpawnFrame > minSpawnGapFrames) {
-    spawnForm();
+  if (band >= 0 && frameCount - lastSpawnFrame > minSpawnGapFrames) {
+    spawnForm(band);
     lastSpawnFrame = frameCount;
   }
 
@@ -291,16 +298,32 @@ void maybeSpawn() {
   while (forms.size() > maxForms) forms.remove(0);
 }
 
-// Create a randomly chosen form type and add it to the list.
-void spawnForm() {
-  int choice = (int)random(5); // 5 types below
+// Default random spawn used by manual triggers/OSC
+void spawnForm() { spawnForm(-1); }
+
+// Spawn a form tuned to the frequency band that begged for attention
+void spawnForm(int band) {
   GlitchForm f;
-  switch (choice) {
-    case 0: f = new PolygonBurst();  break;
-    case 1: f = new WireLissajous(); break;
-    case 2: f = new NoisyDonut();    break;
-    case 3: f = new TriStripWeave(); break;
-    default:f = new SpiroSpline();   break;
+  switch (band) {
+    case 0: // Bass: big chunky shapes
+      f = random(1) < 0.5 ? new PolygonBurst() : new TriStripWeave();
+      break;
+    case 1: // Midrange: rounders and splines
+      f = random(1) < 0.5 ? new NoisyDonut() : new SpiroSpline();
+      break;
+    case 2: // Highs: wiry scribbles
+      f = new WireLissajous();
+      break;
+    default: // Fall back to full random chaos
+      int choice = (int)random(5);
+      switch (choice) {
+        case 0: f = new PolygonBurst();  break;
+        case 1: f = new WireLissajous(); break;
+        case 2: f = new NoisyDonut();    break;
+        case 3: f = new TriStripWeave(); break;
+        default:f = new SpiroSpline();   break;
+      }
+      break;
   }
   forms.add(f);
 }
