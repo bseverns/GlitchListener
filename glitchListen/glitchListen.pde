@@ -71,6 +71,7 @@ float smoothedHigh = 0;
 
 // ── Visual / State Globals ───────────────────────────────────────────────────
 ArrayList<GlitchForm> forms = new ArrayList<GlitchForm>(); // active geometry
+ArrayList<CloudParticle> clouds = new ArrayList<CloudParticle>(); // lingering dust
 int maxForms = 4;                                          // cap the chaos
 
 // Offscreen buffers for effects
@@ -163,7 +164,15 @@ void draw() {
     rect(0, 0, width, height);
   }
 
-  // 4) “Camera shake” for energy — subtle random motion based on analysis
+  // 4) Update lingering dust clouds that give the scene a hazy floor
+  for (int i = clouds.size()-1; i >= 0; i--) {
+    CloudParticle p = clouds.get(i);
+    p.update();
+    p.draw();
+    if (p.dead()) clouds.remove(i);
+  }
+
+  // 5) “Camera shake” for energy — subtle random motion based on analysis
   float energy = constrain(rms * 5 + smoothedHigh * 0.7 + (beat.isOnset() ? 0.4 : 0), 0, 2);
   globalShake  = lerp(globalShake, energy * 12, 0.1);
 
@@ -173,7 +182,7 @@ void draw() {
   translate(random(-globalShake, globalShake), random(-globalShake, globalShake));
   rotate(radians(random(-0.2, 0.2)));
 
-  // 5) Draw/update forms; remove dead ones (short lifespans → restless look)
+  // 6) Draw/update forms; remove dead ones (short lifespans → restless look)
   for (int i = forms.size()-1; i >= 0; i--) {
     GlitchForm f = forms.get(i);
     f.update(rms, smoothedBass, smoothedMid, smoothedHigh, spectralCentroid, beat.isOnset());
@@ -182,15 +191,15 @@ void draw() {
   }
   popMatrix();
 
-  // 6) Post passes: RGB split (channel offsets), then Feedback smear, then Strobe
+  // 7) Post passes: RGB split (channel offsets), then Feedback smear, then Strobe
   if (doRGBShift) rgbSplitComposite();
   if (doFeedback) applyFeedback();
   if (strobeOn)   strobePass();
 
-  // 7) Optional on-screen command crib sheet
+  // 8) Optional on-screen command crib sheet
   if (showHelp) drawHelp();
 
-  // 8) Send telemetry each frame for your rig / recording
+  // 9) Send telemetry each frame for your rig / recording
   sendTelemetry();
 }
 
@@ -294,6 +303,52 @@ void spawnForm() {
     default:f = new SpiroSpline();   break;
   }
   forms.add(f);
+}
+
+// Spawn a puff of particles proportional to a form's complexity
+void explode(GlitchForm f) {
+  int count = min(200, f.complexity());
+  float sx = width/2f + f.x;
+  float sy = height/2f + f.y;
+  for (int i = 0; i < count; i++) {
+    clouds.add(new CloudParticle(sx, sy));
+  }
+  // keep clouds from growing without bound
+  while (clouds.size() > 3000) clouds.remove(0);
+}
+
+// Single drifting dust mote used to build up persistent ground clouds
+class CloudParticle {
+  float x, y;
+  float vx, vy;
+  float life = 0;
+  float lifeMax = random(400, 900);
+
+  CloudParticle(float x, float y) {
+    this.x = x;
+    this.y = y;
+    float ang = random(TWO_PI);
+    float spd = random(0.5, 3);
+    vx = cos(ang) * spd;
+    vy = sin(ang) * spd;
+  }
+
+  void update() {
+    x += vx;
+    y += vy;
+    vx *= 0.96;
+    vy *= 0.96;
+    life++;
+  }
+
+  boolean dead() { return life > lifeMax; }
+
+  void draw() {
+    noStroke();
+    float a = map(life, 0, lifeMax, 60, 0);
+    fill(255, a);
+    ellipse(x, y, 2, 2);
+  }
 }
 
 // ── EFFECT PASS: RGB channel split (chromatic aberration / glitch) ──────────
@@ -494,6 +549,9 @@ abstract class GlitchForm {
   // Start dead-center; jitter will sling them around after birth
   float x = 0;
   float y = 0;
+  float vx = 0;
+  float vy = 0;
+  boolean exploded = false;
 
   // Rotation & spin
   float rot    = random(TWO_PI);
@@ -516,8 +574,26 @@ abstract class GlitchForm {
     rot += rotVel + (onset ? random(-0.1, 0.1) : 0);
 
     // Wander with bias from mid/high bands (feels “nervous” on harsh material)
-    x += random(-3, 3) * (0.5 + high);
-    y += random(-3, 3) * (0.5 + mid);
+    vx += random(-3, 3) * (0.5 + high);
+    vy += random(-3, 3) * (0.5 + mid);
+
+    // Gravitational pull toward nearest edge ramps up as life expires
+    float t = normLife();
+    float grav = t*t*t * 0.8;
+    float distLeft   = width/2f + x;
+    float distRight  = width/2f - x;
+    float distTop    = height/2f + y;
+    float distBottom = height/2f - y;
+    if (distLeft < distRight && distLeft < distTop && distLeft < distBottom)      vx -= grav;
+    else if (distRight < distTop && distRight < distBottom)                       vx += grav;
+    else if (distTop < distBottom)                                                vy -= grav;
+    else                                                                          vy += grav;
+
+    // Damp velocity and apply
+    vx *= 0.98;
+    vy *= 0.98;
+    x  += vx;
+    y  += vy;
 
     // Color mapping: crude but effective band→RGB mapping
     int r = (int)map(high, 0, 0.8, 50, 255);  // highs push red (harshness)
@@ -526,12 +602,22 @@ abstract class GlitchForm {
     strokeCol = color(r, g, b);
     // Fill alpha responds to loudness
     fillCol   = color(r, g, b, (int)map(rms, 0, 0.6, 18, 80));
+
+    // Trigger particle explosion once we slam into any edge
+    if (!exploded && (abs(x) > width/2f || abs(y) > height/2f)) {
+      exploded = true;
+      explode(this);
+      lifeMs = 0; // ensure speedy death
+    }
   }
 
   // Life helpers
   float   life()     { return millis() - born; }
   float   normLife() { return constrain(life() / lifeMs, 0, 1); }
   boolean dead()     { return life() > lifeMs; }
+
+  // Rough complexity metric used to size particle bursts
+  int complexity() { return 60; }
 
   // Subclasses must implement their own draw()
   abstract void draw();
@@ -581,6 +667,8 @@ class PolygonBurst extends GlitchForm {
 
     popStyle(); popMatrix();
   }
+
+  int complexity() { return sides; }
 }
 
 // ── Form 2: WireLissajous ────────────────────────────────────────────────────
@@ -625,6 +713,8 @@ class WireLissajous extends GlitchForm {
 
     popStyle(); popMatrix();
   }
+
+  int complexity() { return pts / 2; }
 }
 
 // ── Form 3: NoisyDonut ───────────────────────────────────────────────────────
@@ -678,6 +768,8 @@ class NoisyDonut extends GlitchForm {
 
     popStyle(); popMatrix();
   }
+
+  int complexity() { return ribs * 7; }
 }
 
 // ── Form 4: TriStripWeave ────────────────────────────────────────────────────
@@ -715,6 +807,8 @@ class TriStripWeave extends GlitchForm {
 
     popStyle(); popMatrix();
   }
+
+  int complexity() { return strips * segs; }
 }
 
 // ── Form 5: SpiroSpline ──────────────────────────────────────────────────────
@@ -755,6 +849,8 @@ class SpiroSpline extends GlitchForm {
 
     popStyle(); popMatrix();
   }
+
+  int complexity() { return pts; }
 }
 
 // ── KEYBOARD CONTROLS (simple show-time interface) ───────────────────────────
