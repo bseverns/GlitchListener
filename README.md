@@ -12,19 +12,6 @@ Because audio visualisation doesn’t have to be safe or polite.  This code doub
 2. Drop this folder into your sketchbook and mash `Run`.
 3. Pump some sound in – mic, synth, your neighbour’s droning fridge.
 
-### Mac users – read this
-If you run into a cranky stack trace ending with something like:
-
-```
-java.lang.RuntimeException: Waited 5000ms for: <18f71a5, f488fe4>[count 2, qsz 0, owner <main-FPSAWTAnimator#00-Timer0>] - <main-FPSAWTAnimator#00-Timer0-FPSAWTAnimator#00-Timer1>
-```
-
-You're hitting a JOGL windowing deadlock.  It often shows up on macOS when OpenGL/NSWindow can't spin up fast enough.  Try these tricks:
-
-* Launch Processing with the `--force` flag for the OpenGL renderer.
-* Make sure no other full-screen apps are hogging the GPU.
-* As a last resort, add `-Djava.awt.headless=true` when running from the CLI.
-
 ## Controls
 
 Here's your live rig cheat sheet—no mysteries, just hot keys:
