@@ -636,11 +636,14 @@ abstract class GlitchForm {
     // Fill alpha responds to loudness
     fillCol   = color(r, g, b, (int)map(rms, 0, 0.6, 18, 80));
 
-    // Trigger particle explosion once we slam into any edge
+    // Trigger particle explosion if we smash the boundary or simply run out of life.
     if (!exploded && (abs(x) > width/2f || abs(y) > height/2f)) {
-      exploded = true;
-      explode(this);
-      lifeMs = 0; // ensure speedy death
+      slamToNearestEdge();
+      triggerExplosion();
+    } else if (!exploded && life() >= lifeMs) {
+      // Age-out should feel like a boundary detonation too.
+      slamToNearestEdge();
+      triggerExplosion();
     }
   }
 
@@ -651,6 +654,34 @@ abstract class GlitchForm {
 
   // Rough complexity metric used to size particle bursts
   int complexity() { return 60; }
+
+  // Snap toward the nearest boundary so the explosion reads like a wall hit.
+  void slamToNearestEdge() {
+    float halfW = width / 2f;
+    float halfH = height / 2f;
+    float distLeft   = halfW + x;
+    float distRight  = halfW - x;
+    float distTop    = halfH + y;
+    float distBottom = halfH - y;
+    float minDist = min(min(distLeft, distRight), min(distTop, distBottom));
+
+    if (minDist == distLeft) {
+      x = -halfW;
+    } else if (minDist == distRight) {
+      x = halfW;
+    } else if (minDist == distTop) {
+      y = -halfH;
+    } else {
+      y = halfH;
+    }
+  }
+
+  // Common explosion trigger — spawns dust and schedules a quick removal.
+  void triggerExplosion() {
+    exploded = true;
+    explode(this);
+    lifeMs = max(life(), 1); // keep normLife() sane but mark for removal next frame
+  }
 
   // Subclasses must implement their own draw()
   abstract void draw();
