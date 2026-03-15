@@ -1,0 +1,15 @@
+{
+  "doFadeFloor": true,
+  "strobeOn": true,
+  "fbAmount": 1,
+  "fbRotate": 0.015000001527369022,
+  "strobeBeatLinked": true,
+  "fbZoom": 1.0499999523162842,
+  "minSpawnGapFrames": 10,
+  "strobeIntensity": 1,
+  "doRGBShift": false,
+  "cinematicOverlay": false,
+  "maxForms": 16,
+  "doFeedback": false,
+  "paletteIndex": 0
+}
