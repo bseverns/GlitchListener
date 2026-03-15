@@ -20,6 +20,8 @@
  *   F      = toggle feedback pass
  *   G      = toggle grainy fade floor (the slow black fade)
  *   B      = toggle beat-linked strobe
+ *   V      = cycle the active palette mood
+ *   O      = toggle cinematic overlay framing
  *   [ / ]  = strobe intensity down/up
  *   - / =  = feedback amount down/up
  *   , / .  = feedback rotation down/up
@@ -83,6 +85,10 @@ boolean doRGBShift  = true;  // channel-split glitch
 boolean doFeedback  = true;  // smear/zoom/rotate previous frame
 boolean doFadeFloor = true;  // slow fading-to-black background
 boolean showHelp    = true;  // on-screen command cheat sheet
+boolean cinematicOverlay = true; // filmic framing + scanline treatment
+
+PaletteMood[] moods;        // curated color worlds for more intentional looks
+int paletteIndex = 0;       // active palette
 
 // Global “camera shake” knob (derived from audio energy)
 float globalShake = 0;
@@ -119,6 +125,8 @@ void setup() {
   surface.setTitle("Glitch Geometry Listener (XL) — Teaching Build");
   frameRate(60); // steady 60 fps target
 
+  initPalettes();
+
   // Initialize Minim + audio input
   minim = new Minim(this);
   // getLineIn(mode, bufferSize, sampleRate, bitDepth)
@@ -145,8 +153,7 @@ void setup() {
   osc = new OscP5(this, oscInPort);
 
   // Initial clear
-  background(0);
-  fb.beginDraw(); fb.background(0); fb.endDraw();
+  resetSceneWash();
 }
 
 // ── Processing draw(): runs every frame ───────────────────────────────────────
@@ -157,12 +164,8 @@ void draw() {
   // 2) Spawning logic (may create a new geometry form on bursts)
   maybeSpawn();
 
-  // 3) Optional global fade (slowly cover frame with translucent black)
-  if (doFadeFloor) {
-    noStroke();
-    fill(0, 28);     // low alpha to keep trails
-    rect(0, 0, width, height);
-  }
+  // 3) Repaint the stage with translucent palette washes and cinematic light
+  paintAtmosphere();
 
   // 4) Update lingering dust clouds that give the scene a hazy floor
   for (int i = clouds.size()-1; i >= 0; i--) {
@@ -195,6 +198,7 @@ void draw() {
   if (doRGBShift) rgbSplitComposite();
   if (doFeedback) applyFeedback();
   if (strobeOn)   strobePass();
+  if (cinematicOverlay) drawCinematicOverlay();
 
   // 8) Optional on-screen command crib sheet
   if (showHelp) drawHelp();
@@ -208,6 +212,147 @@ void stop() {
   in.close();
   minim.stop();
   super.stop();
+}
+
+// ── LOOK SYSTEM: palettes + atmospheric stage painting ──────────────────────
+void initPalettes() {
+  moods = new PaletteMood[] {
+    new PaletteMood(
+      "Sunset Siren",
+      color(6, 10, 22),
+      color(17, 54, 84),
+      color(255, 120, 84),
+      color(70, 154, 255),
+      color(255, 176, 92),
+      color(255, 243, 199),
+      color(9, 5, 12)
+    ),
+    new PaletteMood(
+      "Petrol Bloom",
+      color(4, 18, 18),
+      color(14, 74, 72),
+      color(255, 145, 92),
+      color(72, 219, 182),
+      color(221, 245, 110),
+      color(255, 236, 196),
+      color(4, 10, 8)
+    ),
+    new PaletteMood(
+      "Rust Signal",
+      color(20, 7, 10),
+      color(84, 30, 20),
+      color(255, 104, 72),
+      color(74, 202, 215),
+      color(232, 142, 56),
+      color(255, 231, 202),
+      color(10, 4, 4)
+    )
+  };
+}
+
+PaletteMood currentMood() {
+  return moods[paletteIndex];
+}
+
+int withAlpha(int c, float a) {
+  return color(red(c), green(c), blue(c), constrain(a, 0, 255));
+}
+
+void cyclePalette() {
+  paletteIndex = (paletteIndex + 1) % moods.length;
+  resetSceneWash();
+}
+
+void resetSceneWash() {
+  PaletteMood mood = currentMood();
+  background(mood.bgDark);
+  fb.beginDraw();
+  fb.background(mood.bgDark);
+  fb.endDraw();
+}
+
+void paintAtmosphere() {
+  PaletteMood mood = currentMood();
+  blendMode(BLEND);
+  noStroke();
+
+  float washAlpha = doFadeFloor ? 42 : 16;
+  fill(withAlpha(mood.bgDark, washAlpha));
+  rect(0, 0, width, height);
+
+  for (int y = 0; y < height; y += 18) {
+    float amt = pow(y / (float)height, 0.8);
+    int bandCol = lerpColor(mood.bgMid, mood.bgDark, amt);
+    fill(withAlpha(bandCol, doFadeFloor ? 26 : 10));
+    rect(0, y, width, 22);
+  }
+
+  float bassGlow = map(smoothedBass, 0, 0.5, 160, 620);
+  float midGlow  = map(smoothedMid,  0, 0.45, 100, 380);
+  float highGlow = map(smoothedHigh, 0, 0.35, 80, 240);
+
+  fill(withAlpha(mood.glow, 18 + smoothedBass * 120));
+  ellipse(width * 0.5, height * 0.72, bassGlow * 2.0, bassGlow * 0.9);
+
+  fill(withAlpha(mood.accentLow, 14 + smoothedMid * 90));
+  ellipse(width * 0.22, height * 0.28, midGlow * 1.9, midGlow * 1.2);
+
+  fill(withAlpha(mood.accentMid, 12 + smoothedHigh * 140));
+  ellipse(width * 0.78, height * 0.24, highGlow * 2.2, highGlow * 1.6);
+
+  for (int i = 0; i < 6; i++) {
+    float drift = frameCount * 0.004f + i * 9.7f;
+    float px = width * (0.1f + 0.8f * noise(20 + i * 0.31f, drift));
+    float py = height * (0.2f + 0.55f * noise(80 + i * 0.27f, drift));
+    float pw = 90 + 180 * noise(140 + i * 0.19f, drift);
+    float ph = 180 + 280 * noise(220 + i * 0.22f, drift);
+    int plumeCol = lerpColor(mood.accentLow, mood.accentHigh, i / 5.0f);
+    fill(withAlpha(plumeCol, 8 + spectralFlux * 600));
+    ellipse(px, py, pw, ph);
+  }
+
+  noFill();
+  stroke(withAlpha(mood.accentHigh, 18 + peak * 180));
+  strokeWeight(1.2);
+  ellipse(width * 0.5, height * 0.5, 300 + bassGlow * 0.35, 300 + bassGlow * 0.35);
+  stroke(withAlpha(mood.accentMid, 12 + smoothedHigh * 130));
+  ellipse(width * 0.5, height * 0.5, 540 + midGlow * 0.25, 540 + midGlow * 0.16);
+}
+
+void drawCinematicOverlay() {
+  PaletteMood mood = currentMood();
+  pushStyle();
+  blendMode(BLEND);
+
+  strokeWeight(1);
+  for (int y = 0; y < height; y += 4) {
+    stroke(withAlpha(mood.accentHigh, 5));
+    line(0, y, width, y);
+  }
+
+  noFill();
+  for (int i = 0; i < 9; i++) {
+    float inset = i * 10;
+    stroke(withAlpha(mood.ink, 18 + i * 3));
+    strokeWeight(10);
+    rect(inset, inset, width - inset * 2, height - inset * 2, 24);
+  }
+
+  strokeWeight(1.3);
+  stroke(withAlpha(mood.glow, 45));
+  rect(18, 18, width - 36, height - 36, 24);
+
+  float arm = 72;
+  stroke(withAlpha(mood.accentMid, 55));
+  line(30, 30, 30 + arm, 30);
+  line(30, 30, 30, 30 + arm);
+  line(width - 30, 30, width - 30 - arm, 30);
+  line(width - 30, 30, width - 30, 30 + arm);
+  line(30, height - 30, 30 + arm, height - 30);
+  line(30, height - 30, 30, height - 30 - arm);
+  line(width - 30, height - 30, width - 30 - arm, height - 30);
+  line(width - 30, height - 30, width - 30, height - 30 - arm);
+  popStyle();
 }
 
 // ── AUDIO ANALYSIS: compute RMS, bands, centroid, flux, and detect onsets ───
@@ -369,8 +514,12 @@ class CloudParticle {
   void draw() {
     noStroke();
     float a = map(life, 0, lifeMax, 60, 0);
-    fill(255, a);
-    ellipse(x, y, 2, 2);
+    PaletteMood mood = currentMood();
+    int dustCol = lerpColor(mood.accentLow, mood.accentHigh, noise(x * 0.002f, y * 0.002f));
+    fill(withAlpha(dustCol, a));
+    ellipse(x, y, 2.6, 2.6);
+    fill(withAlpha(mood.glow, a * 0.35));
+    ellipse(x, y, 7, 7);
   }
 }
 
@@ -385,16 +534,17 @@ void rgbSplitComposite() {
   float amt = map(smoothedHigh, 0, 0.6, 0, 12) + (beat.isOnset() ? 8 : 0);
   amt = constrain(amt, 0, 24);
 
-  // 3) Clear the screen to black (prevents edge smears)
   blendMode(BLEND);
   noTint();
-  fill(0); noStroke(); rect(0, 0, width, height);
+  image(frameCopy, 0, 0);
 
-  // 4) Draw each color channel with a different offset
-  tint(255, 0, 0); image(frameCopy,  amt,    0);      // red shifted right
-  tint(0, 255, 0); image(frameCopy, -amt/2,  amt/3);  // green shifted diag
-  tint(0, 0, 255); image(frameCopy, -amt,   -amt/4);  // blue shifted left/up
+  // 3) Add offset color ghosts without erasing the palette underneath.
+  blendMode(SCREEN);
+  tint(255, 90, 70, 105);   image(frameCopy,  amt,    0);      // warm right drift
+  tint(90, 255, 180, 90);   image(frameCopy, -amt/2,  amt/3);  // green-cyan diagonal
+  tint(90, 130, 255, 95);   image(frameCopy, -amt,   -amt/4);  // cool blue echo
   noTint();
+  blendMode(BLEND);
 }
 
 // ── EFFECT PASS: Framebuffer feedback (smear/zoom/rotate previous frame) ────
@@ -445,15 +595,27 @@ void strobePass() {
 
 // ── On-screen instructions ───────────────────────────────────────────────────
 void drawHelp() {
-  int w = 250, h = 250;
-  int x = width - w;
-  int y = height - h;
+  PaletteMood mood = currentMood();
+  int w = 300, h = 292;
+  int x = width - w - 24;
+  int y = height - h - 24;
   pushStyle();
-  fill(0, 180);
+  fill(withAlpha(mood.ink, 215));
   noStroke();
-  rect(x, y, w, h);
-  fill(255);
+  rect(x, y, w, h, 18);
+  stroke(withAlpha(mood.glow, 80));
+  strokeWeight(1.2);
+  noFill();
+  rect(x + 6, y + 6, w - 12, h - 12, 14);
+  fill(mood.accentHigh);
   textAlign(LEFT, TOP);
+  textSize(14);
+  text("GLITCH LISTENER // " + mood.name, x + 18, y + 16);
+  fill(withAlpha(mood.accentMid, 220));
+  textSize(11);
+  text("V: cycle palette", x + 18, y + 40);
+
+  fill(255);
   textSize(12);
   String[] lines = {
     "SPACE: spawn",
@@ -461,6 +623,8 @@ void drawHelp() {
     "F: feedback",
     "G: fade floor",
     "B: strobe",
+    "V: palette",
+    "O: overlay",
     "[ / ]: strobe lvl",
     "- / =: fb amount",
     ", / .: fb rotate",
@@ -470,11 +634,19 @@ void drawHelp() {
     "S: save frame",
     "I: hide help"
   };
-  float ty = y + 10;
+  float ty = y + 68;
   for (String s : lines) {
-    text(s, x + 10, ty);
+    text(s, x + 18, ty);
     ty += 14;
   }
+
+  fill(withAlpha(mood.accentLow, 220));
+  text(
+    "rms " + nf(rms, 1, 3) +
+    "   flux " + nf(spectralFlux, 1, 3) +
+    "   forms " + forms.size(),
+    x + 18, y + h - 32
+  );
   popStyle();
 }
 
@@ -513,6 +685,7 @@ void savePreset() {
   j.setBoolean("doRGBShift", doRGBShift);
   j.setBoolean("doFeedback", doFeedback);
   j.setBoolean("doFadeFloor", doFadeFloor);
+  j.setBoolean("cinematicOverlay", cinematicOverlay);
   j.setBoolean("strobeOn", strobeOn);
   j.setBoolean("strobeBeatLinked", strobeBeatLinked);
   j.setFloat("strobeIntensity", strobeIntensity);
@@ -521,6 +694,7 @@ void savePreset() {
   j.setFloat("fbZoom", fbZoom);
   j.setInt("minSpawnGapFrames", minSpawnGapFrames);
   j.setInt("maxForms", maxForms);
+  j.setInt("paletteIndex", paletteIndex);
 
   String fname = "preset_" + year()
                + nf(month(),2) + nf(day(),2) + "_"
@@ -546,6 +720,7 @@ void loadMostRecentPreset() {
   doRGBShift        = j.getBoolean("doRGBShift", doRGBShift);
   doFeedback        = j.getBoolean("doFeedback", doFeedback);
   doFadeFloor       = j.getBoolean("doFadeFloor", doFadeFloor);
+  cinematicOverlay  = j.getBoolean("cinematicOverlay", cinematicOverlay);
   strobeOn          = j.getBoolean("strobeOn", strobeOn);
   strobeBeatLinked  = j.getBoolean("strobeBeatLinked", strobeBeatLinked);
   strobeIntensity   = j.getFloat("strobeIntensity", strobeIntensity);
@@ -554,8 +729,27 @@ void loadMostRecentPreset() {
   fbZoom            = j.getFloat("fbZoom", fbZoom);
   minSpawnGapFrames = j.getInt("minSpawnGapFrames", minSpawnGapFrames);
   maxForms          = j.getInt("maxForms", maxForms);
+  paletteIndex      = constrain(j.getInt("paletteIndex", paletteIndex), 0, moods.length - 1);
 
+  resetSceneWash();
   println("Loaded preset: data/" + best);
+}
+
+class PaletteMood {
+  String name;
+  int bgDark, bgMid, glow, accentLow, accentMid, accentHigh, ink;
+
+  PaletteMood(String name, int bgDark, int bgMid, int glow,
+              int accentLow, int accentMid, int accentHigh, int ink) {
+    this.name = name;
+    this.bgDark = bgDark;
+    this.bgMid = bgMid;
+    this.glow = glow;
+    this.accentLow = accentLow;
+    this.accentMid = accentMid;
+    this.accentHigh = accentHigh;
+    this.ink = ink;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -589,6 +783,7 @@ abstract class GlitchForm {
   // Visual styling
   int strokeCol = color(255);
   int fillCol   = color(255, 20);
+  int haloCol   = color(255, 40);
   boolean additive = random(1) < 0.6; // choose ADD vs SCREEN blending
 
   GlitchForm() {
@@ -628,13 +823,19 @@ abstract class GlitchForm {
     x  += vx;
     y  += vy;
 
-    // Color mapping: crude but effective band→RGB mapping
-    int r = (int)map(high, 0, 0.8, 50, 255);  // highs push red (harshness)
-    int g = (int)map(mid,  0, 0.8, 30, 200);  // mids push green
-    int b = (int)map(bass, 0, 0.8, 20, 150);  // bass pushes blue
-    strokeCol = color(r, g, b);
-    // Fill alpha responds to loudness
-    fillCol   = color(r, g, b, (int)map(rms, 0, 0.6, 18, 80));
+    // Palette-driven color mapping feels more authored than raw RGB buckets.
+    PaletteMood mood = currentMood();
+    float bassAmt = constrain(bass * 3.0, 0, 1);
+    float midAmt  = constrain(mid  * 3.0, 0, 1);
+    float highAmt = constrain(high * 3.5, 0, 1);
+    float total = max(0.001, bassAmt + midAmt + highAmt);
+
+    int mixCol = lerpColor(mood.accentLow, mood.accentMid, midAmt / total);
+    mixCol = lerpColor(mixCol, mood.accentHigh, highAmt / total);
+    float brightMix = constrain(map(centroid, 250, 5000, 0.08, 0.92), 0, 1);
+    strokeCol = lerpColor(mixCol, mood.glow, brightMix * 0.35 + (onset ? 0.18 : 0));
+    fillCol   = withAlpha(lerpColor(strokeCol, mood.accentHigh, 0.24), map(rms, 0, 0.6, 20, 92));
+    haloCol   = withAlpha(lerpColor(mood.glow, strokeCol, 0.45), map(high + rms, 0, 1.2, 18, 80));
 
     // Trigger particle explosion if we smash the boundary or simply run out of life.
     if (!exploded && (abs(x) > width/2f || abs(y) > height/2f)) {
@@ -683,6 +884,19 @@ abstract class GlitchForm {
     lifeMs = max(life(), 1); // keep normLife() sane but mark for removal next frame
   }
 
+  void drawAura(float rx, float ry) {
+    float t = normLife();
+    float pulse = 1.0 + 0.08 * sin(frameCount * 0.06f + seed);
+    pushStyle();
+    blendMode(ADD);
+    noStroke();
+    fill(withAlpha(haloCol, (1.0 - t) * 24));
+    ellipse(0, 0, rx * 2.3 * pulse, ry * 2.1 * pulse);
+    fill(withAlpha(strokeCol, (1.0 - t) * 12));
+    ellipse(0, 0, rx * 1.35 * pulse, ry * 1.35 * pulse);
+    popStyle();
+  }
+
   // Subclasses must implement their own draw()
   abstract void draw();
 }
@@ -701,6 +915,7 @@ class PolygonBurst extends GlitchForm {
 
     float t    = normLife(); // 0 → 1 across lifespan
     float rNow = radius * (1.0 + 0.6 * sin(TWO_PI * (t + random(0.01))));
+    drawAura(rNow * 0.9, rNow * 0.9);
 
     // Choose a bright blend mode for glow
     if (additive) blendMode(ADD); else blendMode(SCREEN);
@@ -755,6 +970,7 @@ class WireLissajous extends GlitchForm {
 
     float t = normLife();
     float s = 120 + 220 * (1.0 - t); // shrink over life
+    drawAura(s * 0.85, s * 0.85);
 
     // Main path
     beginShape();
@@ -800,6 +1016,7 @@ class NoisyDonut extends GlitchForm {
     float t   = normLife();
     float rr1 = r1 * (1.0 + 0.25 * sin(frameCount*0.07));
     float rr2 = r2 * (1.0 + 0.4  * sin(frameCount*0.11 + seed));
+    drawAura(rr1 * 0.95, rr1 * 0.95);
 
     for (int i = 0; i < ribs; i++) {
       float a   = TWO_PI * i / ribs;
@@ -853,6 +1070,7 @@ class TriStripWeave extends GlitchForm {
     noFill();
 
     float t = normLife();
+    drawAura(90 + strips * 16, 90 + strips * 16);
 
     for (int s = 0; s < strips; s++) {
       float rad = 60 + s*16 + 20 * sin((frameCount + s*9) * 0.06);
@@ -892,6 +1110,7 @@ class SpiroSpline extends GlitchForm {
     strokeWeight(1.3);
 
     float t = normLife();
+    drawAura(R * 0.85 + p, R * 0.85 + p);
 
     beginShape();
     for (int i = 0; i < pts; i++) {
@@ -937,6 +1156,12 @@ void keyPressed() {
   if (key == 'b' || key == 'B') {       // toggle beat-linked strobe
     strobeBeatLinked = !strobeBeatLinked;
     if (strobeBeatLinked) strobeCountdown = strobeHoldFrames;
+  }
+  if (key == 'v' || key == 'V') {       // cycle palette mood
+    cyclePalette();
+  }
+  if (key == 'o' || key == 'O') {       // toggle framing overlay
+    cinematicOverlay = !cinematicOverlay;
   }
   if (key == '[')  strobeIntensity = max(0,   strobeIntensity - 0.05);
   if (key == ']')  strobeIntensity = min(1,   strobeIntensity + 0.05);

@@ -21,6 +21,8 @@ Here's your live rig cheat sheet—no mysteries, just hot keys:
 * `F` – switch the feedback smear.
 * `G` – fade the floor to black.
 * `B` – beat-driven strobe.
+* `V` – cycle between the built-in palette moods.
+* `O` – toggle the cinematic frame and scanline overlay.
 * `[ / ]` – strobe intensity down/up.
 * `- / =` – feedback amount down/up.
 * `, / .` – feedback rotation.
@@ -30,7 +32,7 @@ Here's your live rig cheat sheet—no mysteries, just hot keys:
 * `S` – grab a `saveFrame()` screenshot.
 * `I` – hide or show the on-screen help box squatting in the lower-right 250×250 patch.
 
-Shapes now pop in from jittery starting points all over the field—never jailed in one corner—before wandering off like caffeinated fireflies.
+Shapes now pop in from jittery starting points all over the field—never jailed in one corner—before wandering off like caffeinated fireflies. The stage now carries atmospheric color washes, drifting light plumes, palette-based rendering, and a filmic framing pass so the sketch reads more like an animated poster than a pure debug visualizer.
 
 ### How the chaos triggers
 
@@ -45,4 +47,3 @@ The sketch ships with a `stop()` that cleans up Minim so the audio driver doesn�
 ## Contribute or fork off
 
 Got ideas?  Fork it, make it weirder, and send a PR.  Or don’t.  Punk rock means doing your own thing.
-
