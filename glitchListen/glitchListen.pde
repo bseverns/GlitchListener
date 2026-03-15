@@ -116,8 +116,8 @@ int oscInPort = 9000;                              // where we listen
 
 // ── Processing setup(): runs once at program start ───────────────────────────
 void settings() {
-  // P2D renderer = fast 2D w/ OpenGL; 1000×1000 canvas as requested
-  size(1000, 1000, P2D);
+  // JAVA2D is more stable than P2D/JOGL on this machine with these post passes.
+  size(1000, 1000);
   smooth(4); // anti-aliasing
 }
 
@@ -146,8 +146,8 @@ void setup() {
   lastSpectrum = new float[fft.specSize()];
 
   // Offscreen buffers
-  fb        = createGraphics(width, height, P2D);
-  frameCopy = createGraphics(width, height, P2D);
+  fb        = createGraphics(width, height);
+  frameCopy = createGraphics(width, height);
 
   // Start OSC server
   osc = new OscP5(this, oscInPort);
@@ -525,9 +525,10 @@ class CloudParticle {
 
 // ── EFFECT PASS: RGB channel split (chromatic aberration / glitch) ──────────
 void rgbSplitComposite() {
-  // 1) Copy the on-screen frame to an offscreen buffer (frameCopy)
+  // 1) Copy the current frame into an offscreen buffer.
+  // Avoid get() here: full-frame OpenGL readbacks can stall the animator.
   frameCopy.beginDraw();
-  frameCopy.image(get(), 0, 0); // get() grabs the current display window
+  frameCopy.copy(g, 0, 0, width, height, 0, 0, width, height);
   frameCopy.endDraw();
 
   // 2) Compute how far to split channels. More highs + onsets → larger split
@@ -562,9 +563,10 @@ void applyFeedback() {
   fb.rotate(fbRotate);  // slight rotation each frame
   fb.translate(-fb.width/2f, -fb.height/2f);
 
-  // Draw the *current* visible frame into fb with some alpha (fbAmount)
+  // Draw the *current* visible frame into fb with some alpha (fbAmount).
+  // copy(g, ...) avoids the P2D readback path that get() uses.
   fb.tint(255, 255 * fbAmount);
-  fb.image(get(), 0, 0);
+  fb.copy(g, 0, 0, width, height, 0, 0, width, height);
   fb.noTint();
 
   fb.popMatrix();
@@ -769,6 +771,14 @@ abstract class GlitchForm {
   float vx = 0;
   float vy = 0;
   boolean exploded = false;
+  float homeX = 0;
+  float homeY = 0;
+  float swirl = random(-0.04, 0.04);
+  float driftStrength = random(0.55, 1.35);
+  float settleStrength = random(0.0012, 0.0042);
+  float noiseOffsetX = random(1000);
+  float noiseOffsetY = random(1000);
+  int motionMode = (int)random(4);
 
   // Rotation & spin
   float rot    = random(TWO_PI);
@@ -787,13 +797,45 @@ abstract class GlitchForm {
   boolean additive = random(1) < 0.6; // choose ADD vs SCREEN blending
 
   GlitchForm() {
-    // Randomize spawn away from corners so we don't cluster bottom-right again
-    float rx = width * 0.4f;
-    float ry = height * 0.4f;
-    x = random(-rx, rx);
-    y = random(-ry, ry);
-    vx = random(-2, 2);
-    vy = random(-2, 2);
+    // Mix interior launches, edge sweeps, and long diagonals for more varied staging.
+    float rx = width * 0.42f;
+    float ry = height * 0.42f;
+    homeX = random(-width * 0.34f, width * 0.34f);
+    homeY = random(-height * 0.34f, height * 0.34f);
+
+    switch (motionMode) {
+      case 0:
+        x = random(-rx, rx);
+        y = random(-ry, ry);
+        vx = random(-2.5f, 2.5f);
+        vy = random(-2.5f, 2.5f);
+        break;
+      case 1:
+        if (random(1) < 0.5) {
+          x = random(1) < 0.5 ? -width * 0.55f : width * 0.55f;
+          y = random(-height * 0.3f, height * 0.3f);
+        } else {
+          x = random(-width * 0.3f, width * 0.3f);
+          y = random(1) < 0.5 ? -height * 0.55f : height * 0.55f;
+        }
+        vx = (homeX - x) * 0.018f + random(-1.8f, 1.8f);
+        vy = (homeY - y) * 0.018f + random(-1.8f, 1.8f);
+        break;
+      case 2:
+        x = random(1) < 0.5 ? random(-width * 0.52f, -width * 0.18f) : random(width * 0.18f, width * 0.52f);
+        y = random(1) < 0.5 ? -height * 0.52f : height * 0.52f;
+        vx = random(-0.9f, 0.9f) + (homeX - x) * 0.01f;
+        vy = random(-0.9f, 0.9f) + (homeY - y) * 0.01f;
+        break;
+      default:
+        x = random(-width * 0.15f, width * 0.15f);
+        y = random(-height * 0.15f, height * 0.15f);
+        homeX = random(1) < 0.5 ? random(-width * 0.48f, -width * 0.18f) : random(width * 0.18f, width * 0.48f);
+        homeY = random(1) < 0.5 ? random(-height * 0.48f, -height * 0.18f) : random(height * 0.18f, height * 0.48f);
+        vx = random(-1.2f, 1.2f);
+        vy = random(-1.2f, 1.2f);
+        break;
+    }
   }
 
   // Called each frame with fresh audio features
@@ -801,9 +843,25 @@ abstract class GlitchForm {
     // Spin a little, snap more on onsets
     rot += rotVel + (onset ? random(-0.1, 0.1) : 0);
 
-    // Wander with bias from mid/high bands (feels “nervous” on harsh material)
-    vx += random(-3, 3) * (0.5 + high);
-    vy += random(-3, 3) * (0.5 + mid);
+    // Each form gets its own curved drift toward an off-center "home" point.
+    float driftT = frameCount * 0.010f + seed * 0.00002f;
+    float flowX = map(noise(noiseOffsetX, driftT), 0, 1, -1, 1);
+    float flowY = map(noise(noiseOffsetY, driftT), 0, 1, -1, 1);
+    vx += flowX * (0.7 + high * 2.6) * driftStrength;
+    vy += flowY * (0.7 + mid  * 2.2) * driftStrength;
+
+    float dx = homeX - x;
+    float dy = homeY - y;
+    float dist = max(40, sqrt(dx*dx + dy*dy));
+    float pull = settleStrength * (0.65 + bass * 2.0);
+    float curve = swirl * (0.8 + high * 1.4) / dist;
+    vx += dx * pull - dy * curve;
+    vy += dy * pull + dx * curve;
+
+    if (onset) {
+      vx += dx * 0.0025f + random(-1.4f, 1.4f);
+      vy += dy * 0.0025f + random(-1.4f, 1.4f);
+    }
 
     // Gravitational pull toward nearest edge ramps up as life expires
     float t = normLife();
@@ -1004,6 +1062,9 @@ class NoisyDonut extends GlitchForm {
   int   ribs = (int)random(20, 48); // how many donut slices
   float r1   = random(80, 160);     // base outer radius
   float r2   = random(26, 60);      // tube radius
+  float angularWarp = random(0.12f, 0.42f);
+  float ribNoiseScale = random(0.09f, 0.22f);
+  float phaseDrift = random(TWO_PI);
 
   void draw() {
     pushMatrix(); pushStyle();
@@ -1018,13 +1079,17 @@ class NoisyDonut extends GlitchForm {
     float rr2 = r2 * (1.0 + 0.4  * sin(frameCount*0.11 + seed));
     drawAura(rr1 * 0.95, rr1 * 0.95);
 
+    float angleCursor = 0;
     for (int i = 0; i < ribs; i++) {
-      float a   = TWO_PI * i / ribs;
-      float a2  = TWO_PI * (i+1) / ribs;
+      float step1 = TWO_PI / ribs * (0.62f + 0.92f * noise(seed * 0.0001f + i * ribNoiseScale, t * 5 + frameCount * 0.01f));
+      float step2 = TWO_PI / ribs * (0.62f + 0.92f * noise(seed * 0.0002f + (i + 1) * ribNoiseScale, t * 5 + frameCount * 0.01f));
+      float a   = angleCursor + angularWarp * sin(frameCount * 0.03f + phaseDrift + i * 0.35f);
+      angleCursor += step1;
+      float a2  = angleCursor + angularWarp * sin(frameCount * 0.03f + phaseDrift + i * 0.35f + 0.9f);
 
       // Per-slice noise to deform outer radius
-      float n1  = noise(i*0.09,     frameCount*0.02) * 40 * (1.4 - t);
-      float n2  = noise((i+1)*0.09, frameCount*0.02) * 40 * (1.4 - t);
+      float n1  = noise(i * ribNoiseScale,         frameCount * 0.02f + seed * 0.00003f) * 46 * (1.4 - t);
+      float n2  = noise((i + 1) * ribNoiseScale,   frameCount * 0.02f + seed * 0.00003f) * 46 * (1.4 - t);
 
       float R1 = rr1 + n1, R2 = rr1 + n2;
 
@@ -1035,12 +1100,13 @@ class NoisyDonut extends GlitchForm {
       // Build one “rib” as a small triangle strip along the tube angle
       beginShape(TRIANGLE_STRIP);
       for (int k = 0; k <= 6; k++) {
-        float phi = map(k, 0, 6, 0, TWO_PI); // sweep around tube
-        float ar  = map(k, 0, 6, a, a2);     // move along ring segment
-        float x1 = (R1 + rr2*cos(phi)) * cos(ar);
-        float y1 = (R1 + rr2*cos(phi)) * sin(ar);
-        float x2 = (R2 + rr2*cos(phi)) * cos(a2);
-        float y2 = (R2 + rr2*cos(phi)) * sin(a2);
+        float phi = map(k, 0, 6, 0, TWO_PI) + 0.3f * sin(i * 0.24f + k * 0.8f + phaseDrift + t * 10);
+        float ar  = lerp(a, a2 + step2 * 0.2f, k / 6.0f);
+        float skew = 1.0f + 0.18f * sin(ar * 3.0f + phaseDrift);
+        float x1 = (R1 + rr2 * cos(phi) * skew) * cos(ar);
+        float y1 = (R1 + rr2 * cos(phi) * skew) * sin(ar);
+        float x2 = (R2 + rr2 * cos(phi) / skew) * cos(a2);
+        float y2 = (R2 + rr2 * cos(phi) / skew) * sin(a2);
         vertex(x1, y1);
         vertex(x2, y2);
       }
@@ -1098,6 +1164,10 @@ class TriStripWeave extends GlitchForm {
 class SpiroSpline extends GlitchForm {
   int   pts = 900;
   float R = random(120, 220), r = random(12, 60), p = random(10, 80);
+  float stepBase = random(0.022f, 0.05f);
+  float angularWarp = random(0.12f, 0.45f);
+  float radialWarp = random(0.08f, 0.28f);
+  float phaseDrift = random(TWO_PI);
 
   void draw() {
     pushMatrix(); pushStyle();
@@ -1113,11 +1183,15 @@ class SpiroSpline extends GlitchForm {
     drawAura(R * 0.85 + p, R * 0.85 + p);
 
     beginShape();
+    float u = 0;
     for (int i = 0; i < pts; i++) {
-      float u  = i * 0.04f;
-      float a  = u + t * 14; // time drift to keep it evolving
-      float px = (R - r) * cos(a) + p * cos(((R - r) / r) * a);
-      float py = (R - r) * sin(a) - p * sin(((R - r) / r) * a);
+      u += stepBase * (0.65f + 1.25f * noise(seed * 0.0002f + i * 0.014f, frameCount * 0.008f + t * 2.7f));
+      float a = u + t * 14;
+      float bend = angularWarp * sin(a * 0.65f + phaseDrift) + angularWarp * 0.55f * (noise(i * 0.02f + phaseDrift, t * 3.5f) - 0.5f);
+      float q = a + bend;
+      float radiusScale = 1.0f + radialWarp * sin(q * 1.7f + phaseDrift) + radialWarp * 0.7f * (noise(i * 0.012f + seed * 0.0003f, frameCount * 0.006f) - 0.5f);
+      float px = ((R - r) * cos(q) + p * cos(((R - r) / r) * q + bend * 0.8f)) * radiusScale;
+      float py = ((R - r) * sin(q) - p * sin(((R - r) / r) * q + bend * 0.5f)) * radiusScale;
 
       // “Tearing” jitter declines over life
       px += random(-3, 3) * (1.8 - t);
